@@ -331,7 +331,6 @@ async def quotes_batch(
 @router.get("/indices")
 async def indices(
     kite: KiteConnect = Depends(get_kite),
-    user: dict = Depends(get_current_user),
 ) -> dict:
     """Fetch live index quotes with rolling sparklines."""
     global _index_cache, _index_cache_ts
@@ -452,8 +451,7 @@ async def quote_history(
         to_date = datetime.now(settings.TIMEZONE)
         from_date = to_date - timedelta(days=days)
 
-        fmt = lambda d: d.strftime("%Y-%m-%d")
-        candles = kite.historical_data(token, interval, fmt(from_date), fmt(to_date))
+        candles = kite.historical_data(token, from_date, to_date, interval)
 
         return {
             "success": True,
@@ -537,8 +535,7 @@ async def quote_intraday(
         now = datetime.now(settings.TIMEZONE)
         market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
 
-        fmt = lambda d: d.strftime("%Y-%m-%d %H:%M:%S")
-        candles = kite.historical_data(token, interval, fmt(market_open), fmt(now))
+        candles = kite.historical_data(token, market_open, now, interval)
 
         return {
             "success": True,
