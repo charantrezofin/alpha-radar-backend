@@ -326,7 +326,8 @@ async def quotes_batch(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-# ── GET /api/indices ─────────────────────────────────────────────────────────
+# ── GET /api/indices (also aliased as /api/quotes/indices) ──────────────────
+@router.get("/quotes/indices")
 @router.get("/indices")
 async def indices(
     kite: KiteConnect = Depends(get_kite),
@@ -557,5 +558,48 @@ async def quote_intraday(
         }
     except HTTPException:
         raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── GET /api/quotes/sectors ────────────────────────────────────────────────
+@router.get("/quotes/sectors")
+async def quote_sectors(
+    kite: KiteConnect = Depends(get_kite),
+) -> dict:
+    """Sector index quotes for the sector heatmap."""
+    SECTOR_INDICES = [
+        "NIFTY IT", "NIFTY BANK", "NIFTY PRIVATE BANK", "NIFTY PSU BANK",
+        "NIFTY FIN SERVICE", "NIFTY AUTO", "NIFTY PHARMA", "NIFTY HEALTHCARE INDEX",
+        "NIFTY METAL", "NIFTY FMCG", "NIFTY MEDIA", "NIFTY REALTY",
+        "NIFTY ENERGY", "NIFTY OIL & GAS", "NIFTY COMMODITIES",
+        "NIFTY INFRASTRUCTURE", "NIFTY CPSE", "NIFTY MNC",
+    ]
+    try:
+        symbols = [f"NSE:{s}" for s in SECTOR_INDICES]
+        q = kite.quote(symbols)
+        results = []
+        for sym in SECTOR_INDICES:
+            key = f"NSE:{sym}"
+            d = q.get(key)
+            if not d:
+                continue
+            ohlc = d.get("ohlc", {})
+            last = d.get("last_price", 0)
+            prev = ohlc.get("close", last)
+            change = last - prev
+            change_pct = (change / prev * 100) if prev else 0
+            results.append({
+                "symbol": sym,
+                "name": sym.replace("NIFTY ", ""),
+                "last": last,
+                "change": round(change, 2),
+                "changePct": round(change_pct, 2),
+                "open": ohlc.get("open", 0),
+                "high": ohlc.get("high", 0),
+                "low": ohlc.get("low", 0),
+                "close": prev,
+            })
+        return {"sectors": results}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
