@@ -19,6 +19,7 @@ from kiteconnect import KiteConnect
 from supabase import Client
 
 from app.config import settings
+from app.core.session_cache import save_session, load_session, is_market_hours
 from app.dependencies import get_current_user, get_kite, get_supabase, require_premium
 
 logger = logging.getLogger("alpha_radar.routes.market")
@@ -154,13 +155,27 @@ async def breadth(
             if pct > 1 and avg > 0 and vol / avg >= 1.5:
                 strong_buy += 1
 
-        return {
+        response = {
             "advances": advances, "declines": declines, "unchanged": unchanged,
             "strongBuy": strong_buy, "total": total,
             "timestamp": int(time.time() * 1000),
         }
 
+        # Session cache: save if we got meaningful data
+        if total > 0 and (advances > 0 or declines > 0):
+            save_session("breadth", response)
+
+        return response
+
     except Exception as exc:
+        # Serve cached data when market is closed
+        if not is_market_hours():
+            cached = load_session("breadth")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -316,10 +331,24 @@ async def sector_momentum(
             result.append(sec)
 
         result.sort(key=lambda s: s["avgChangePct"], reverse=True)
-        return {"sectors": result, "timestamp": int(time.time() * 1000)}
+        response = {"sectors": result, "timestamp": int(time.time() * 1000)}
+
+        # Session cache: save if we got meaningful data
+        if result:
+            save_session("sector_momentum", response)
+
+        return response
 
     except Exception as exc:
         logger.exception("Sector momentum error")
+        # Serve cached data when market is closed
+        if not is_market_hours():
+            cached = load_session("sector_momentum")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -334,6 +363,17 @@ async def top_movers(
 
     if _movers_cache and time.time() - _movers_cache_ts < 20:
         return _movers_cache
+
+    # If market is closed and no in-memory cache, try session cache
+    if not is_market_hours() and not _movers_cache:
+        cached = load_session("top_movers")
+        if cached:
+            resp = cached["data"]
+            resp["cached"] = True
+            resp["cachedAt"] = cached.get("timestamp")
+            _movers_cache = resp
+            _movers_cache_ts = time.time()
+            return resp
 
     try:
         fno_stocks = _get_fno_stocks()
@@ -365,9 +405,22 @@ async def top_movers(
         active = sorted(stocks, key=lambda x: x["volume"], reverse=True)[:8]
 
         result = {"gainers": gainers, "losers": losers, "active": active, "timestamp": int(time.time() * 1000)}
+
+        # Session cache: save if we got meaningful data (non-zero changes)
+        if stocks and any(s.get("chg", 0) != 0 for s in stocks):
+            save_session("top_movers", result)
+
         _movers_cache = result
         _movers_cache_ts = time.time()
         return result
 
     except Exception as exc:
+        # Serve cached data when market is closed
+        if not is_market_hours():
+            cached = load_session("top_movers")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))

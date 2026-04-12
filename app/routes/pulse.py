@@ -16,6 +16,7 @@ from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
 from app.config import settings
+from app.core.session_cache import save_session, load_session, is_market_hours
 from app.dependencies import get_kite
 from app.engines import compute_pulse
 
@@ -183,7 +184,7 @@ async def market_pulse(
         )
         boost_list = sorted(results, key=lambda r: r["rFactor"], reverse=True)
 
-        return {
+        response = {
             "success": True,
             "beacon": beacon_list,
             "boost": boost_list,
@@ -197,6 +198,20 @@ async def market_pulse(
             "statsCached": len(_stats_cache),
         }
 
+        # Session cache: save if we got meaningful data
+        if beacon_list or boost_list:
+            save_session("pulse", response)
+
+        return response
+
     except Exception as exc:
         logger.exception("[pulse] Error")
+        # Serve cached data when market is closed
+        if not is_market_hours():
+            cached = load_session("pulse")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))

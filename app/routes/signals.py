@@ -8,9 +8,11 @@ Ported from:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -19,6 +21,7 @@ from pydantic import BaseModel
 from supabase import Client
 
 from app.config import settings
+from app.core.session_cache import save_session, load_session, is_market_hours
 from app.dependencies import get_current_user, get_kite, get_supabase, require_premium
 from app.engines import (
     compute_oi_signal,
@@ -396,20 +399,41 @@ async def get_signals(
     - indices: sequential fetch of options chain per index
     - stocks: 2-phase (futures prescreen then deep options on top N)
     """
+    cache_key = f"signals_{category}"
     try:
         if category == "indices":
             signals = _get_index_signals(kite)
-            return {"success": True, "signals": signals, "summary": _build_summary(signals), "timestamp": int(time.time() * 1000)}
+            response = {"success": True, "signals": signals, "summary": _build_summary(signals), "timestamp": int(time.time() * 1000)}
+            if signals:
+                save_session(cache_key, response)
+            elif not is_market_hours():
+                cached = load_session(cache_key)
+                if cached:
+                    resp = cached["data"]
+                    resp["cached"] = True
+                    resp["cachedAt"] = cached.get("timestamp")
+                    return resp
+            return response
 
         if category == "stocks":
             result = _get_stock_signals(kite, deep)
-            return {
+            response = {
                 "success": True,
                 "signals": result["deepSignals"],
                 "preScreened": result["preScreened"],
                 "summary": _build_summary(result["deepSignals"]),
                 "timestamp": int(time.time() * 1000),
             }
+            if result["deepSignals"] or result["preScreened"]:
+                save_session(cache_key, response)
+            elif not is_market_hours():
+                cached = load_session(cache_key)
+                if cached:
+                    resp = cached["data"]
+                    resp["cached"] = True
+                    resp["cachedAt"] = cached.get("timestamp")
+                    return resp
+            return response
 
         # Default: all
         index_signals = _get_index_signals(kite)
@@ -419,16 +443,34 @@ async def get_signals(
             key=lambda s: abs(s.get("score", 0)),
             reverse=True,
         )
-        return {
+        response = {
             "success": True,
             "signals": all_signals,
             "preScreened": stock_result["preScreened"],
             "summary": _build_summary(all_signals),
             "timestamp": int(time.time() * 1000),
         }
+        if all_signals:
+            save_session(cache_key, response)
+        elif not is_market_hours():
+            cached = load_session(cache_key)
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
+        return response
 
     except Exception as exc:
         logger.exception("[signals] Error")
+        # On error, try serving cached data if market is closed
+        if not is_market_hours():
+            cached = load_session(cache_key)
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))
 
 

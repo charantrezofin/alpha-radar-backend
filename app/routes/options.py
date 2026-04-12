@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Path
 from kiteconnect import KiteConnect
 
+from app.core.session_cache import save_session, load_session, is_market_hours
 from app.dependencies import get_kite
 
 logger = logging.getLogger("alpha_radar.routes.options")
@@ -293,15 +294,35 @@ async def options_chain(
             detail={"error": "Unknown index", "available": list(INDEX_CONFIG.keys())},
         )
 
+    session_key = f"options_{key}"
+
     # Return cache if <60s old
     cached = _oi_cache.get(key)
     if cached and time.time() - cached["ts"] < 60:
         return {"success": True, **cached["data"], "cached": True}
 
+    # If market is closed and no in-memory cache, try session cache
+    if not is_market_hours() and not cached:
+        session_cached = load_session(session_key)
+        if session_cached:
+            resp = {"success": True, **session_cached["data"], "cached": True, "cachedAt": session_cached.get("timestamp")}
+            return resp
+
     try:
         data = get_options_chain(kite, key)
         _oi_cache[key] = {"ts": time.time(), "data": data}
+
+        # Session cache: save if we got meaningful chain data
+        if data.get("chain") and len(data["chain"]) > 0:
+            save_session(session_key, data)
+
         return {"success": True, **data}
     except Exception as exc:
         logger.exception("[options] Error for %s", key)
+        # Serve cached data when market is closed
+        if not is_market_hours():
+            session_cached = load_session(session_key)
+            if session_cached:
+                resp = {"success": True, **session_cached["data"], "cached": True, "cachedAt": session_cached.get("timestamp")}
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))

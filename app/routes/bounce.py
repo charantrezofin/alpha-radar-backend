@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from kiteconnect import KiteConnect
 
+from app.core.session_cache import save_session, load_session, is_market_hours
 from app.dependencies import get_kite, require_premium
 from app.engines import compute_buying_score, detect_52w_bounce
 
@@ -59,6 +60,17 @@ async def bounce_52w(
 
     if _bounce_cache and time.time() - _bounce_cache_ts < _BOUNCE_TTL:
         return _bounce_cache
+
+    # If market is closed and no in-memory cache, try session cache
+    if not is_market_hours() and not _bounce_cache:
+        cached = load_session("52w_bounce")
+        if cached:
+            resp = cached["data"]
+            resp["cached"] = True
+            resp["cachedAt"] = cached.get("timestamp")
+            _bounce_cache = resp
+            _bounce_cache_ts = time.time()
+            return resp
 
     try:
         nifty500 = _get_nifty500()
@@ -135,10 +147,23 @@ async def bounce_52w(
         bounce_stocks.sort(key=lambda s: s["volRatio"], reverse=True)
 
         result = {"stocks": bounce_stocks, "count": len(bounce_stocks), "timestamp": int(time.time() * 1000)}
+
+        # Session cache: save if we got meaningful data
+        if bounce_stocks:
+            save_session("52w_bounce", result)
+
         _bounce_cache = result
         _bounce_cache_ts = time.time()
         return result
 
     except Exception as exc:
         logger.exception("52W bounce error")
+        # Serve cached data when market is closed
+        if not is_market_hours():
+            cached = load_session("52w_bounce")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))

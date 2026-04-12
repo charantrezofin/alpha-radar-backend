@@ -21,6 +21,7 @@ from supabase import Client
 
 from app.config import settings
 from app.core.kite_client import kite_state
+from app.core.session_cache import save_session, load_session, is_market_hours
 from app.dependencies import get_current_user, get_kite, get_supabase
 from app.engines import compute_buying_score, compute_bear_score
 
@@ -356,6 +357,17 @@ async def indices(
     if _index_cache and time.time() - _index_cache_ts < 8:
         return _index_cache
 
+    # If market is closed and no in-memory cache, try session cache
+    if not is_market_hours() and not _index_cache:
+        cached = load_session("indices")
+        if cached:
+            resp = cached["data"]
+            resp["cached"] = True
+            resp["cachedAt"] = cached.get("timestamp")
+            _index_cache = resp
+            _index_cache_ts = time.time()
+            return resp
+
     try:
         q = kite.quote(list(INDEX_SYMBOLS.values()))
         index_list: list[dict] = []
@@ -386,12 +398,25 @@ async def indices(
             })
 
         result = {"indices": index_list, "timestamp": int(time.time() * 1000)}
+
+        # Session cache: save if we got meaningful data
+        if index_list and any(i.get("ltp", 0) > 0 for i in index_list):
+            save_session("indices", result)
+
         _index_cache = result
         _index_cache_ts = time.time()
         return result
 
     except Exception as exc:
         logger.exception("Index quotes error")
+        # Serve cached data when market is closed
+        if not is_market_hours():
+            cached = load_session("indices")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         raise HTTPException(status_code=500, detail=str(exc))
 
 
