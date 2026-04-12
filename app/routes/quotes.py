@@ -469,7 +469,37 @@ async def quote_history(
         to_date = datetime.now(settings.TIMEZONE)
         from_date = to_date - timedelta(days=days)
 
-        candles = kite.historical_data(token, from_date, to_date, interval)
+        # Kite doesn't support "month" or "monthly" interval — fetch daily and resample
+        is_monthly = interval in ("month", "monthly")
+        kite_interval = "day" if is_monthly else interval
+
+        candles = kite.historical_data(token, from_date, to_date, kite_interval)
+
+        if is_monthly and candles:
+            # Resample daily candles to monthly OHLCV
+            import pandas as pd
+            df = pd.DataFrame(candles)
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date")
+            monthly = df.resample("ME").agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }).dropna()
+            candles = [
+                {
+                    "date": str(idx),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": int(row["volume"]),
+                }
+                for idx, row in monthly.iterrows()
+            ]
+            return {"success": True, "symbol": symbol, "data": candles}
 
         return {
             "success": True,
