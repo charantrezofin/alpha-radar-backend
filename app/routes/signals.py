@@ -478,9 +478,11 @@ async def get_signals(
 @router.get("/live-signals")
 async def live_signals(user: dict = Depends(get_current_user)) -> dict:
     """PDH/PDL cross counts and combo surge counts from live tracker."""
+    from app.core.session_cache import save_session, load_session, is_market_hours
+
     try:
         from app.caches import live_tracker, bear_tracker
-        return {
+        result = {
             "pdhCrossed": list(live_tracker.pdh_crossed),
             "comboSurge": list(live_tracker.combo_surge),
             "firstCrossTime": dict(live_tracker.first_cross_time),
@@ -495,8 +497,22 @@ async def live_signals(user: dict = Depends(get_current_user)) -> dict:
             "comboSellCount": len(bear_tracker.combo_sell),
             "timestamp": int(time.time() * 1000),
         }
+
+        # Cache if we have meaningful data
+        if result["pdhCrossCount"] > 0 or result["pdlCrossCount"] > 0:
+            save_session("live_signals", result)
+
+        return result
     except ImportError:
-        # Trackers not yet initialized -- return empty
+        # Trackers not initialized — serve cached if market closed
+        if not is_market_hours():
+            cached = load_session("live_signals")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
+
         return {
             "pdhCrossed": [], "comboSurge": [],
             "firstCrossTime": {}, "firstComboTime": {},
@@ -523,7 +539,7 @@ async def orb_signals(user: dict = Depends(require_premium)) -> dict:
         new_breaks_down_30 = list(state.get("new_breaks_down_30", []))
         orb_detector.clear_new_breaks()
 
-        return {
+        result = {
             "nearOrb15": list(state.get("near_orb_15", [])),
             "orbBreak15": list(state.get("orb_break_15", [])),
             "nearOrb30": list(state.get("near_orb_30", [])),
@@ -541,7 +557,23 @@ async def orb_signals(user: dict = Depends(require_premium)) -> dict:
             "orbLoaded": state.get("loaded_count", 0),
             "timestamp": int(time.time() * 1000),
         }
+
+        # Cache if we have ORB data
+        if result.get("orbLoaded", 0) > 0:
+            from app.core.session_cache import save_session
+            save_session("orb_signals", result)
+
+        return result
     except ImportError:
+        # Serve cached ORB data when market closed
+        from app.core.session_cache import load_session, is_market_hours
+        if not is_market_hours():
+            cached = load_session("orb_signals")
+            if cached:
+                resp = cached["data"]
+                resp["cached"] = True
+                resp["cachedAt"] = cached.get("timestamp")
+                return resp
         return {"orbLoaded": 0, "timestamp": int(time.time() * 1000)}
 
 
