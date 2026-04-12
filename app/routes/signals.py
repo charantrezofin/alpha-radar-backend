@@ -108,18 +108,28 @@ def _get_index_signals(kite: KiteConnect) -> list[dict]:
                 )
                 chain_rows.append(ChainRow(strike=row["strike"], call=call_leg, put=put_leg))
 
+            pcr_val = data["analytics"]["pcr"]
+            spot_val = data["spot"]
+            max_pain_val = data["analytics"]["maxPainStrike"]
+            pcr_sent = "BULLISH" if pcr_val > 1.3 else "BEARISH" if pcr_val < 0.7 else "NEUTRAL"
+            max_pain_dist = ((spot_val - max_pain_val) / spot_val * 100) if spot_val else 0
+
             analytics = ChainAnalytics(
-                pcr=data["analytics"]["pcr"],
-                max_pain_strike=data["analytics"]["maxPainStrike"],
+                pcr=pcr_val,
+                pcr_sentiment=pcr_sent,
+                max_pain_strike=max_pain_val,
+                max_pain_distance=round(max_pain_dist, 2),
                 total_call_oi=data["analytics"]["totalCallOI"],
                 total_put_oi=data["analytics"]["totalPutOI"],
+                resistance=data["analytics"].get("topOICalls", []),
+                support=data["analytics"].get("topOIPuts", []),
                 atm_iv=data["analytics"]["atmIV"],
             )
 
             signal = compute_oi_signal(
                 symbol=data["name"],
                 category="index",
-                spot=data["spot"],
+                spot=spot_val,
                 prev_close=data.get("prevClose", 0),
                 expiry=data["expiry"],
                 strike_step=data["strikeStep"],
@@ -322,8 +332,11 @@ def _get_stock_signals(kite: KiteConnect, deep_limit: int = 20) -> dict:
                 )
                 for row in chain
             ]
+            pcr_sent = "BULLISH" if pcr > 1.3 else "BEARISH" if pcr < 0.7 else "NEUTRAL"
+            mp_dist = ((stock_spot - max_pain_strike) / stock_spot * 100) if stock_spot else 0
             analytics = ChainAnalytics(
-                pcr=pcr, max_pain_strike=max_pain_strike,
+                pcr=pcr, pcr_sentiment=pcr_sent,
+                max_pain_strike=max_pain_strike, max_pain_distance=round(mp_dist, 2),
                 total_call_oi=total_call_oi, total_put_oi=total_put_oi, atm_iv=round(atm_iv, 1),
             )
 
