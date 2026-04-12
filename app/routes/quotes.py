@@ -57,6 +57,48 @@ _index_cache_ts: float = 0
 
 
 # ---------------------------------------------------------------------------
+# Index 1-month returns cache
+# ---------------------------------------------------------------------------
+_month_returns_cache: dict[str, float] = {}
+_month_returns_ts: float = 0
+_MONTH_RETURNS_TTL = 3600  # 1 hour
+
+
+def _get_index_month_returns(kite: KiteConnect) -> dict[str, float]:
+    """Compute 1-month returns for all indices. Cached for 1 hour."""
+    global _month_returns_cache, _month_returns_ts
+
+    if _month_returns_cache and time.time() - _month_returns_ts < _MONTH_RETURNS_TTL:
+        return _month_returns_cache
+
+    results: dict[str, float] = {}
+    now = datetime.now(settings.TIMEZONE)
+    from_date = now - timedelta(days=35)
+
+    for key, kite_sym in INDEX_SYMBOLS.items():
+        try:
+            ltp_data = kite.ltp([kite_sym])
+            entry = ltp_data.get(kite_sym)
+            if not entry:
+                continue
+            token = entry["instrument_token"]
+            current_price = entry["last_price"]
+
+            candles = kite.historical_data(token, from_date, now, "day")
+            if candles and len(candles) >= 2:
+                price_30d = candles[0]["close"]
+                month_ret = round(((current_price - price_30d) / price_30d) * 100, 2) if price_30d > 0 else 0
+                results[key] = month_ret
+        except Exception:
+            results[key] = 0
+
+    _month_returns_cache = results
+    _month_returns_ts = time.time()
+    logger.info("[indices] Computed 1-month returns for %d indices", len(results))
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -374,6 +416,9 @@ async def indices(
         q = kite.quote(list(INDEX_SYMBOLS.values()))
         index_list: list[dict] = []
 
+        # Fetch 1-month returns for all indices (cached separately)
+        month_returns = _get_index_month_returns(kite)
+
         for key, kite_sym in INDEX_SYMBOLS.items():
             d = q.get(kite_sym)
             if not d:
@@ -396,6 +441,7 @@ async def indices(
                 "open": d.get("ohlc", {}).get("open"),
                 "high": d.get("ohlc", {}).get("high"),
                 "low": d.get("ohlc", {}).get("low"),
+                "monthReturn": month_returns.get(key, 0),
                 "sparkline": list(_index_sparklines[key]),
             })
 
