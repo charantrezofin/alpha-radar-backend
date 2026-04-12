@@ -56,9 +56,8 @@ def _ensure_daily_stats(kite: KiteConnect, symbols: list[str]) -> None:
                 token = entry["instrument_token"]
                 to_date = datetime.now(settings.TIMEZONE)
                 from_date = to_date - timedelta(days=20)
-                fmt = lambda d: d.strftime("%Y-%m-%d")
 
-                bars = kite.historical_data(token, "day", fmt(from_date), fmt(to_date))
+                bars = kite.historical_data(token, from_date, to_date, "day")
                 if not bars or len(bars) < 5:
                     continue
 

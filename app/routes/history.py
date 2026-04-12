@@ -160,8 +160,8 @@ async def index_candles(
         raise HTTPException(status_code=400, detail="Unknown index")
 
     try:
-        today = datetime.now(settings.TIMEZONE).strftime("%Y-%m-%d")
-        candles = kite.historical_data(cfg["histToken"], "5minute", today, today)
+        today = datetime.now(settings.TIMEZONE)
+        candles = kite.historical_data(cfg["histToken"], today, today, "5minute")
         return {"candles": candles or [], "index": key}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
