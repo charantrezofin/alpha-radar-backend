@@ -675,3 +675,114 @@ async def quote_sectors(
         return {"sectors": results}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Hot/Cold sector indices cache
+# ---------------------------------------------------------------------------
+_hot_cold_cache: dict | None = None
+_hot_cold_cache_ts: float = 0
+_HOT_COLD_TTL = 3600  # 1 hour
+
+
+# ── GET /api/hot-cold-indices ─────────────────────────────────────────────
+@router.get("/hot-cold-indices")
+async def hot_cold_indices(
+    kite: KiteConnect = Depends(get_kite),
+) -> dict:
+    """
+    Return the hottest and coldest NSE sector index by 1-month return.
+    Cached for 1 hour.
+    """
+    global _hot_cold_cache, _hot_cold_cache_ts
+
+    if _hot_cold_cache and time.time() - _hot_cold_cache_ts < _HOT_COLD_TTL:
+        return _hot_cold_cache
+
+    HOT_COLD_SECTOR_INDICES = [
+        "NIFTY IT", "NIFTY BANK", "NIFTY AUTO", "NIFTY PHARMA",
+        "NIFTY METAL", "NIFTY FMCG", "NIFTY REALTY", "NIFTY ENERGY",
+        "NIFTY INFRA", "NIFTY PSU BANK", "NIFTY MEDIA",
+        "NIFTY PRIVATE BANK", "NIFTY FIN SERVICE",
+    ]
+
+    try:
+        # 1. Get current quotes for all sector indices
+        kite_symbols = [f"NSE:{s}" for s in HOT_COLD_SECTOR_INDICES]
+        quotes = kite.quote(kite_symbols)
+
+        # 2. For each, get 30-day historical data and compute 1-month return
+        now = datetime.now(settings.TIMEZONE)
+        from_date = now - timedelta(days=35)  # extra buffer for non-trading days
+
+        results = []
+        for sym_name in HOT_COLD_SECTOR_INDICES:
+            kite_sym = f"NSE:{sym_name}"
+            q = quotes.get(kite_sym)
+            if not q:
+                continue
+
+            last_price = q.get("last_price", 0)
+            if last_price <= 0:
+                continue
+
+            ohlc = q.get("ohlc", {})
+            prev_close = ohlc.get("close", last_price) or last_price
+            today_change_pct = round(((last_price - prev_close) / prev_close) * 100, 2) if prev_close > 0 else 0
+
+            # Fetch 30-day historical data
+            try:
+                token = q.get("instrument_token")
+                if not token:
+                    ltp_data = kite.ltp([kite_sym])
+                    entry = ltp_data.get(kite_sym)
+                    if entry:
+                        token = entry["instrument_token"]
+                if not token:
+                    continue
+
+                candles = kite.historical_data(token, from_date, now, "day")
+                if not candles or len(candles) < 2:
+                    continue
+
+                # Price ~30 days ago (first candle in the range)
+                price_30d_ago = candles[0]["close"]
+                month_return = round(((last_price - price_30d_ago) / price_30d_ago) * 100, 2) if price_30d_ago > 0 else 0
+
+                results.append({
+                    "name": sym_name,
+                    "symbol": kite_sym,
+                    "last": round(last_price, 2),
+                    "monthReturn": month_return,
+                    "changePct": today_change_pct,
+                })
+            except Exception as e:
+                logger.warning("Hot/cold historical fetch failed for %s: %s", sym_name, e)
+                continue
+
+        if not results:
+            raise HTTPException(status_code=500, detail="No sector data available")
+
+        # 3. Sort by 1-month return
+        results.sort(key=lambda x: x["monthReturn"], reverse=True)
+        hot = results[0]
+        cold = results[-1]
+
+        response = {
+            "hot": hot,
+            "cold": cold,
+            "timestamp": int(time.time() * 1000),
+        }
+
+        _hot_cold_cache = response
+        _hot_cold_cache_ts = time.time()
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Hot/cold indices error")
+        # Return cached data if available
+        if _hot_cold_cache:
+            return _hot_cold_cache
+        raise HTTPException(status_code=500, detail=str(exc))
