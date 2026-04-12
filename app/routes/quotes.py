@@ -156,6 +156,24 @@ class BatchQuoteBody(BaseModel):
 # Routes
 # ---------------------------------------------------------------------------
 
+# ── GET /api/quotes — lightweight quote fetch (used by heatmap, etc.) ────────
+@router.get("/quotes")
+async def quotes_simple(
+    symbols: str = Query("", description="Comma-separated NSE symbols"),
+    kite: KiteConnect = Depends(get_kite),
+) -> dict:
+    """Simple quote fetch without scoring — returns raw Kite data."""
+    if not symbols:
+        return {"success": True, "data": {}}
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    try:
+        kite_symbols = [f"NSE:{s}" for s in sym_list]
+        data = kite.quote(kite_symbols)
+        return {"success": True, "data": data}
+    except Exception as exc:
+        return {"success": False, "data": {}, "error": str(exc)}
+
+
 # ── GET /api/quotes-batch ────────────────────────────────────────────────────
 @router.get("/quotes-batch")
 async def quotes_batch(
