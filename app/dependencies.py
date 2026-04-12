@@ -99,11 +99,36 @@ async def _verify_supabase_jwt(token: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Current user dependency
 # ---------------------------------------------------------------------------
+_DEV_USER = {
+    "id": "dev-local-user",
+    "email": "dev@localhost",
+    "raw": {},
+    "is_dev": True,
+}
+
+
+def _is_localhost(request: Request) -> bool:
+    """Check if the request originates from localhost."""
+    host = request.headers.get("host", "")
+    origin = request.headers.get("origin", "")
+    return "localhost" in host or "127.0.0.1" in host or "localhost" in origin
+
+
 async def get_current_user(request: Request) -> dict[str, Any]:
     """
     Validate the JWT from the request and return a dict with at least
     ``id`` (user UUID) and ``email``.
+
+    On localhost, if no token is provided, returns a dev user to allow
+    development without Supabase auth.
     """
+    auth_header = request.headers.get("Authorization", "")
+
+    # On localhost, allow unauthenticated access for development
+    if not auth_header.startswith("Bearer ") and _is_localhost(request):
+        logger.debug("Localhost request without auth — using dev user")
+        return _DEV_USER
+
     token = _extract_bearer_token(request)
     user = await _verify_supabase_jwt(token)
     user_id = user.get("id")
@@ -129,6 +154,12 @@ async def require_premium(
     """
     user = await get_current_user(request)
     user_id: str = user["id"]
+
+    # Localhost dev user — grant premium for development
+    if user.get("is_dev"):
+        user["is_premium"] = True
+        user["is_admin"] = True
+        return user
 
     # Check admin bypass
     admin_header = request.headers.get("X-Admin-Secret", "")
