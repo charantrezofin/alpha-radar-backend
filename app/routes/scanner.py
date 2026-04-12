@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
@@ -24,11 +24,19 @@ logger = logging.getLogger("alpha_radar.routes.scanner")
 router = APIRouter(prefix="/api/scanner", tags=["scanner"])
 
 
-# ── Request model ────────────────────────────────────────────────────────────
+# ── Request models ───────────────────────────────────────────────────────────
 class ScannerBody(BaseModel):
     symbols: list[str]
     timeframe: str = "daily"
     days: int = 90
+
+
+class CPRSymbolData(BaseModel):
+    symbol: str
+    daily: list[dict]
+    weekly: list[dict] | None = None
+    monthly: list[dict] | None = None
+    current_price: float | None = None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -93,30 +101,98 @@ def _fetch_historical_for_symbols(
 # ── POST /api/scanner/cpr ────────────────────────────────────────────────────
 @router.post("/cpr")
 async def scan_cpr(
-    body: ScannerBody,
+    request: Request,
     kite: KiteConnect = Depends(get_kite),
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """Fetch OHLC for symbols, run CPR multi-timeframe scan."""
-    try:
-        ohlc_data = _fetch_historical_for_symbols(kite, body.symbols, body.days)
+    """
+    CPR multi-timeframe scan.
+    Accepts body as either:
+      - {symbols: ["SYM1", ...]} → backend fetches OHLC
+      - [{symbol, daily, weekly?, monthly?, current_price?}, ...] → pre-fetched OHLC from frontend
+    """
+    body_data = await request.json()
 
+    try:
         results: list[dict] = []
-        try:
-            from app.engines.cpr import scan_cpr as cpr_engine
-            for symbol, candles in ohlc_data.items():
+
+        # Detect format: array of {symbol, daily, ...} or {symbols: [...]}
+        if isinstance(body_data, list):
+            # Frontend sends pre-fetched OHLC data
+            for item in body_data:
+                symbol = item.get("symbol", "")
+                daily = item.get("daily", [])
+                weekly = item.get("weekly") or []
+                monthly = item.get("monthly") or []
+                current_price = item.get("current_price")
+
+                if not daily or len(daily) < 5:
+                    continue
+
                 try:
-                    result = cpr_engine(symbol, candles)
+                    from app.engines.cpr.cpr_calculator import compute_cpr_series, analyse_cpr_sequence
+                    from app.engines.cpr.pema_calculator import compute_pema
+                    from app.engines.cpr.signal_scorer import score_symbol
+                    import pandas as pd
+
+                    def _to_df(candles):
+                        if not candles:
+                            return pd.DataFrame()
+                        df = pd.DataFrame(candles)
+                        for col in ["open", "high", "low", "close"]:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                        if "volume" in df.columns:
+                            df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
+                        if "date" in df.columns:
+                            df["date"] = pd.to_datetime(df["date"])
+                        return df
+
+                    daily_df = _to_df(daily)
+                    weekly_df = _to_df(weekly) if weekly else pd.DataFrame()
+                    monthly_df = _to_df(monthly) if monthly else pd.DataFrame()
+
+                    result = score_symbol(
+                        symbol=symbol,
+                        daily=daily_df,
+                        weekly=weekly_df if not weekly_df.empty else None,
+                        monthly=monthly_df if not monthly_df.empty else None,
+                        intraday=None,
+                        current_price=current_price or (float(daily_df.iloc[-1]["close"]) if len(daily_df) > 0 else 0),
+                    )
                     if result:
-                        results.append(result.__dict__ if hasattr(result, "__dict__") else result)
-                except Exception:
-                    pass
-        except ImportError:
-            # Engine not yet available -- return raw OHLC with placeholder
+                        results.append(result if isinstance(result, dict) else result.__dict__ if hasattr(result, "__dict__") else {"symbol": symbol})
+
+                except ImportError:
+                    # Fallback: compute basic CPR levels
+                    if daily and len(daily) >= 2:
+                        prev = daily[-2]
+                        h, l, c = float(prev["high"]), float(prev["low"]), float(prev["close"])
+                        pivot = (h + l + c) / 3
+                        bc = (h + l) / 2
+                        tc = 2 * pivot - bc
+                        ltp = current_price or float(daily[-1]["close"])
+                        width = abs(tc - bc)
+                        width_pct = (width / ltp * 100) if ltp else 0
+                        results.append({
+                            "symbol": symbol,
+                            "score": 0,
+                            "direction": "NEUTRAL",
+                            "alertTier": "None",
+                            "cprLevels": {"pivot": round(pivot, 2), "bc": round(min(bc, tc), 2), "tc": round(max(bc, tc), 2)},
+                            "cprWidth": round(width, 2),
+                            "cprWidthPct": round(width_pct, 2),
+                            "ltp": ltp,
+                        })
+                except Exception as e:
+                    logger.debug("CPR scan failed for %s: %s", symbol, e)
+
+        elif isinstance(body_data, dict) and "symbols" in body_data:
+            # Backend fetches OHLC
+            symbols = body_data["symbols"]
+            ohlc_data = _fetch_historical_for_symbols(kite, symbols, body_data.get("days", 120))
             for symbol, candles in ohlc_data.items():
-                if candles:
-                    last = candles[-1]
-                    prev = candles[-2] if len(candles) >= 2 else last
+                if candles and len(candles) >= 2:
+                    prev = candles[-2]
                     pivot = (prev["high"] + prev["low"] + prev["close"]) / 3
                     bc = (prev["high"] + prev["low"]) / 2
                     tc = 2 * pivot - bc
@@ -124,15 +200,11 @@ async def scan_cpr(
                         "symbol": symbol,
                         "score": 0,
                         "direction": "NEUTRAL",
-                        "alertTier": "LOW",
-                        "cprLevels": {
-                            "pivot": round(pivot, 2),
-                            "bc": round(min(bc, tc), 2),
-                            "tc": round(max(bc, tc), 2),
-                        },
+                        "cprLevels": {"pivot": round(pivot, 2), "bc": round(min(bc, tc), 2), "tc": round(max(bc, tc), 2)},
                         "cprWidth": round(abs(tc - bc), 2),
                     })
 
+        results.sort(key=lambda r: abs(r.get("score", 0)), reverse=True)
         return {"success": True, "results": results, "count": len(results), "timestamp": int(time.time() * 1000)}
 
     except Exception as exc:
