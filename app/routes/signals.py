@@ -186,17 +186,21 @@ def _get_stock_signals(kite: KiteConnect, deep_limit: int = 20) -> dict:
         spot_price = spot_quote.get("last_price") or fut_quote.get("last_price", 0)
         spot_prev_close = spot_quote.get("ohlc", {}).get("close", 0) or 0
 
+        fut_last = fut_quote.get("last_price", 0)
+        fut_close = fut_quote.get("ohlc", {}).get("close", 0) or 0
+        fut_oi = fut_quote.get("oi", 0) or 0
+        fut_oi_day_low = fut_quote.get("oi_day_low", 0) or 0
+        fut_volume = fut_quote.get("volume", 0) or 0
+        change_pct = ((fut_last - fut_close) / fut_close * 100) if fut_close else 0
+
         result = prescreen_stock(
             name=name,
-            tradingsymbol=inst["tradingsymbol"],
-            lot_size=inst.get("lot_size", 0),
-            fut_last=fut_quote.get("last_price", 0),
-            fut_close=fut_quote.get("ohlc", {}).get("close", 0) or 0,
-            fut_oi=fut_quote.get("oi", 0) or 0,
-            fut_oi_day_low=fut_quote.get("oi_day_low", 0) or 0,
-            fut_volume=fut_quote.get("volume", 0) or 0,
-            spot_price=spot_price,
-            spot_prev_close=spot_prev_close,
+            spot=spot_price,
+            fut_price=fut_last,
+            change_pct=change_pct,
+            oi=fut_oi,
+            oi_change=fut_oi - fut_oi_day_low,
+            volume=fut_volume,
         )
         if result.oi > 0:
             pre_screened.append(result.__dict__ if hasattr(result, "__dict__") else result)
