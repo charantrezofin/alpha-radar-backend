@@ -116,10 +116,15 @@ async def scan_cpr(
     try:
         results: list[dict] = []
 
-        # Detect format: array of {symbol, daily, ...} or {symbols: [...]}
-        if isinstance(body_data, list):
+        # Detect format: {symbols: [{symbol, daily, ...}]} or {symbols: ["SYM1", ...]}
+        items = body_data if isinstance(body_data, list) else body_data.get("symbols", [])
+
+        # Check if items are pre-fetched OHLC objects or plain symbol strings
+        has_ohlc = items and isinstance(items[0], dict) and "daily" in items[0]
+
+        if has_ohlc:
             # Frontend sends pre-fetched OHLC data
-            for item in body_data:
+            for item in items:
                 symbol = item.get("symbol", "")
                 daily = item.get("daily", [])
                 weekly = item.get("weekly") or []
@@ -186,9 +191,10 @@ async def scan_cpr(
                 except Exception as e:
                     logger.debug("CPR scan failed for %s: %s", symbol, e)
 
-        elif isinstance(body_data, dict) and "symbols" in body_data:
-            # Backend fetches OHLC
-            symbols = body_data["symbols"]
+        else:
+            # Plain symbol strings — backend fetches OHLC
+            symbols = [s if isinstance(s, str) else s.get("symbol", "") for s in items]
+            symbols = [s for s in symbols if s]
             ohlc_data = _fetch_historical_for_symbols(kite, symbols, body_data.get("days", 120))
             for symbol, candles in ohlc_data.items():
                 if candles and len(candles) >= 2:
