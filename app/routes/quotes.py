@@ -40,14 +40,16 @@ _instruments_list_ts: float = 0
 _INSTRUMENTS_LIST_TTL = 86400  # 24 hours
 
 # Index symbols
+# Row 1: Core indices (always shown)
 INDEX_SYMBOLS = {
     "NIFTY50": "NSE:NIFTY 50",
-    "BANKNIFTY": "NSE:NIFTY BANK",
-    "FINNIFTY": "NSE:NIFTY FIN SERVICE",
-    "MIDCAP": "NSE:NIFTY MID SELECT",
-    "VIX": "NSE:INDIA VIX",
     "SENSEX": "BSE:SENSEX",
+    "BANKNIFTY": "NSE:NIFTY BANK",
+    "VIX": "NSE:INDIA VIX",
+    "MIDCAP": "NSE:NIFTY MIDCAP 100",
+    "SMALLCAP": "NSE:NIFTY SMLCAP 100",
 }
+# Hot/Cold indices are added dynamically from sector performance
 _index_sparklines: dict[str, list[float]] = {k: [] for k in INDEX_SYMBOLS}
 _MAX_SPARK = 48
 _index_cache: dict | None = None
