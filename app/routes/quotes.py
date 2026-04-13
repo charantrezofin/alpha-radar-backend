@@ -692,6 +692,7 @@ async def quote_sectors(
         "NIFTY METAL", "NIFTY FMCG", "NIFTY MEDIA", "NIFTY REALTY",
         "NIFTY ENERGY", "NIFTY OIL & GAS", "NIFTY COMMODITIES",
         "NIFTY INFRASTRUCTURE", "NIFTY CPSE", "NIFTY MNC",
+        "NIFTY INDIA DEFENCE", "NIFTY CAPITAL MKT",
     ]
     try:
         symbols = [f"NSE:{s}" for s in SECTOR_INDICES]
