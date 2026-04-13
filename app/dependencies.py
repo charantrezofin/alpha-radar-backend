@@ -119,14 +119,15 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     Validate the JWT from the request and return a dict with at least
     ``id`` (user UUID) and ``email``.
 
-    On localhost, if no token is provided, returns a dev user to allow
-    development without Supabase auth.
+    If no token is provided, returns a guest user for read-only access.
+    This allows the platform to work without requiring login for viewing data.
+    Write operations (watchlist, feedback, subscription) should use require_authenticated.
     """
     auth_header = request.headers.get("Authorization", "")
 
-    # On localhost, allow unauthenticated access for development
-    if not auth_header.startswith("Bearer ") and _is_localhost(request):
-        logger.debug("Localhost request without auth — using dev user")
+    # Allow unauthenticated access — return guest user for read-only endpoints
+    if not auth_header.startswith("Bearer "):
+        logger.debug("No auth token — using guest user for read-only access")
         return _DEV_USER
 
     token = _extract_bearer_token(request)
