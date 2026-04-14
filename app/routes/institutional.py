@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from kiteconnect import KiteConnect
 
-from app.dependencies import get_kite, require_premium
+from app.dependencies import get_kite
 from app.engines.institutional_buying import score_stock, build_sector_clusters
 
 logger = logging.getLogger("alpha_radar.routes.institutional")
@@ -209,9 +209,8 @@ async def institutional_buying(
     refresh: bool = Query(False, description="Force a fresh scan"),
     universe: str = Query("nifty500", description="fno | nifty500 | all"),
     kite: KiteConnect = Depends(get_kite),
-    user: dict = Depends(require_premium),
 ) -> Dict[str, Any]:
-    """Scan the selected universe for institutional accumulation (premium only)."""
+    """Scan the selected universe for institutional accumulation."""
     u = (universe or "nifty500").lower()
     if u not in ("fno", "nifty500", "all"):
         u = "nifty500"
