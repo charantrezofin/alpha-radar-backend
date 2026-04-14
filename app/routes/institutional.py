@@ -219,35 +219,38 @@ async def institutional_buying(
     cached = _inst_cache.get(u)
     ts = _inst_cache_ts.get(u, 0)
     age = now - ts if cached else None
+    scanning = _inst_scanning.get(u, False)
 
-    # Force refresh
+    # Empty placeholder when no data yet
+    empty = {
+        "stocks": [], "clusters": [],
+        "stats": {"scanned": 0, "filtered_liquidity": 0, "qualifying": 0,
+                  "errors": 0, "five_star": 0, "four_star": 0, "three_star": 0,
+                  "elapsed_sec": 0},
+        "timestamp": int(time.time() * 1000),
+    }
+
+    # Force refresh -> kick off background scan, return immediately
     if refresh:
-        try:
-            result = await asyncio.to_thread(_run_scan_sync, kite, u)
-            _inst_cache[u] = result
-            _inst_cache_ts[u] = time.time()
-            return {**result, "universe": u, "cached": False, "scanning": False}
-        except Exception as exc:
-            logger.exception("Forced institutional scan failed")
-            raise HTTPException(status_code=500, detail=str(exc))
+        if not scanning:
+            background.add_task(_background_refresh, kite, u)
+        return {**(cached or empty), "universe": u, "cached": bool(cached),
+                "stale": True, "scanning": True,
+                "age_seconds": int(age) if age is not None else None}
 
-    # Fresh cache
+    # Fresh cache -> return directly
     if cached and age is not None and age < _STALE_AFTER:
         return {**cached, "universe": u, "cached": True,
-                "age_seconds": int(age), "scanning": _inst_scanning.get(u, False)}
+                "age_seconds": int(age), "scanning": scanning}
 
-    # Stale but valid -> serve stale, trigger background refresh
+    # Stale cache -> return stale + kick off background refresh
     if cached and age is not None and age < _INST_TTL:
-        background.add_task(_background_refresh, kite, u)
+        if not scanning:
+            background.add_task(_background_refresh, kite, u)
         return {**cached, "universe": u, "cached": True, "stale": True,
                 "age_seconds": int(age), "scanning": True}
 
-    # No cache or expired -> run synchronously
-    try:
-        result = await asyncio.to_thread(_run_scan_sync, kite, u)
-        _inst_cache[u] = result
-        _inst_cache_ts[u] = time.time()
-        return {**result, "universe": u, "cached": False, "scanning": False}
-    except Exception as exc:
-        logger.exception("Institutional scan failed")
-        raise HTTPException(status_code=500, detail=str(exc))
+    # No cache / expired -> kick off background scan, return empty
+    if not scanning:
+        background.add_task(_background_refresh, kite, u)
+    return {**empty, "universe": u, "cached": False, "scanning": True}
