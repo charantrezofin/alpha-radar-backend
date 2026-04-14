@@ -146,6 +146,7 @@ def _mount_routers() -> None:
         "app.routes.pulse",
         "app.routes.squeeze",
         "app.routes.bounce",
+        "app.routes.institutional",
         "app.routes.market",
         "app.routes.fno",
         "app.routes.subscription",
