@@ -29,10 +29,10 @@ logger = logging.getLogger("alpha_radar.routes.institutional")
 
 router = APIRouter(prefix="/api", tags=["institutional"])
 
-# ── Cache ────────────────────────────────────────────────────────────────────
-_inst_cache: Dict[str, Any] | None = None
-_inst_cache_ts: float = 0
-_inst_scanning: bool = False
+# ── Cache (keyed by universe) ────────────────────────────────────────────────
+_inst_cache: Dict[str, Dict[str, Any]] = {}
+_inst_cache_ts: Dict[str, float] = {}
+_inst_scanning: Dict[str, bool] = {}
 _INST_TTL = 3600  # 60 min
 _STALE_AFTER = 1800  # 30 min -> trigger background refresh
 
@@ -51,6 +51,39 @@ def _get_fno_stocks(kite: KiteConnect) -> List[str]:
             stock_set.add(i["name"])
     indices = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"}
     return sorted(stock_set - indices)
+
+
+def _get_nifty500(kite: KiteConnect) -> List[str]:
+    """Nifty 500 from the static cache if available, else fallback to full F&O + NSE EQ filter."""
+    try:
+        from app.caches import stock_universes  # type: ignore
+        return list(stock_universes.NIFTY500_STOCKS)
+    except Exception:
+        return _get_all_nse_eq(kite)
+
+
+def _get_all_nse_eq(kite: KiteConnect) -> List[str]:
+    """All NSE equity symbols (tradeable EQ segment). Large universe (~2000)."""
+    try:
+        nse = kite.instruments("NSE")
+    except Exception:
+        return []
+    return sorted({
+        i["tradingsymbol"] for i in nse
+        if i.get("segment") == "NSE" and i.get("instrument_type") == "EQ"
+    })
+
+
+def _resolve_universe(kite: KiteConnect, universe: str) -> List[str]:
+    u = (universe or "").lower()
+    if u == "fno":
+        return _get_fno_stocks(kite)
+    if u in ("nifty500", "n500", "500"):
+        return _get_nifty500(kite)
+    if u in ("all", "nse"):
+        return _get_all_nse_eq(kite)
+    # default
+    return _get_nifty500(kite)
 
 
 def _get_instrument_token(kite: KiteConnect, symbol: str,
@@ -85,11 +118,11 @@ def _fetch_candles(kite: KiteConnect, token: int, days: int = 180
     return out
 
 
-def _run_scan_sync(kite: KiteConnect) -> Dict[str, Any]:
+def _run_scan_sync(kite: KiteConnect, universe: str = "nifty500") -> Dict[str, Any]:
     """Blocking scan; call from a thread via asyncio.to_thread."""
     started = time.time()
-    symbols = _get_fno_stocks(kite)
-    logger.info("Institutional scan: %d F&O stocks", len(symbols))
+    symbols = _resolve_universe(kite, universe)
+    logger.info("Institutional scan: %d stocks (universe=%s)", len(symbols), universe)
 
     token_cache: Dict[str, int] = {}
     # Pre-load NSE instruments once
@@ -153,21 +186,20 @@ def _run_scan_sync(kite: KiteConnect) -> Dict[str, Any]:
     }
 
 
-async def _background_refresh(kite: KiteConnect) -> None:
-    global _inst_cache, _inst_cache_ts, _inst_scanning
-    if _inst_scanning:
+async def _background_refresh(kite: KiteConnect, universe: str) -> None:
+    if _inst_scanning.get(universe):
         return
-    _inst_scanning = True
+    _inst_scanning[universe] = True
     try:
-        result = await asyncio.to_thread(_run_scan_sync, kite)
-        _inst_cache = result
-        _inst_cache_ts = time.time()
-        logger.info("Institutional scan complete: %d qualifying, %d clusters",
-                    result["stats"]["qualifying"], len(result["clusters"]))
+        result = await asyncio.to_thread(_run_scan_sync, kite, universe)
+        _inst_cache[universe] = result
+        _inst_cache_ts[universe] = time.time()
+        logger.info("Institutional scan complete [%s]: %d qualifying, %d clusters",
+                    universe, result["stats"]["qualifying"], len(result["clusters"]))
     except Exception:
         logger.exception("Background institutional scan failed")
     finally:
-        _inst_scanning = False
+        _inst_scanning[universe] = False
 
 
 # ── GET /api/institutional-buying ───────────────────────────────────────────
@@ -175,42 +207,48 @@ async def _background_refresh(kite: KiteConnect) -> None:
 async def institutional_buying(
     background: BackgroundTasks,
     refresh: bool = Query(False, description="Force a fresh scan"),
+    universe: str = Query("nifty500", description="fno | nifty500 | all"),
     kite: KiteConnect = Depends(get_kite),
     user: dict = Depends(require_premium),
 ) -> Dict[str, Any]:
-    """Scan the F&O universe for institutional accumulation (premium only)."""
-    global _inst_cache, _inst_cache_ts
+    """Scan the selected universe for institutional accumulation (premium only)."""
+    u = (universe or "nifty500").lower()
+    if u not in ("fno", "nifty500", "all"):
+        u = "nifty500"
 
     now = time.time()
-    age = now - _inst_cache_ts if _inst_cache else None
+    cached = _inst_cache.get(u)
+    ts = _inst_cache_ts.get(u, 0)
+    age = now - ts if cached else None
 
     # Force refresh
     if refresh:
         try:
-            result = await asyncio.to_thread(_run_scan_sync, kite)
-            _inst_cache = result
-            _inst_cache_ts = time.time()
-            return {**result, "cached": False, "scanning": False}
+            result = await asyncio.to_thread(_run_scan_sync, kite, u)
+            _inst_cache[u] = result
+            _inst_cache_ts[u] = time.time()
+            return {**result, "universe": u, "cached": False, "scanning": False}
         except Exception as exc:
             logger.exception("Forced institutional scan failed")
             raise HTTPException(status_code=500, detail=str(exc))
 
     # Fresh cache
-    if _inst_cache and age is not None and age < _STALE_AFTER:
-        return {**_inst_cache, "cached": True, "age_seconds": int(age), "scanning": _inst_scanning}
+    if cached and age is not None and age < _STALE_AFTER:
+        return {**cached, "universe": u, "cached": True,
+                "age_seconds": int(age), "scanning": _inst_scanning.get(u, False)}
 
     # Stale but valid -> serve stale, trigger background refresh
-    if _inst_cache and age is not None and age < _INST_TTL:
-        background.add_task(_background_refresh, kite)
-        return {**_inst_cache, "cached": True, "stale": True,
+    if cached and age is not None and age < _INST_TTL:
+        background.add_task(_background_refresh, kite, u)
+        return {**cached, "universe": u, "cached": True, "stale": True,
                 "age_seconds": int(age), "scanning": True}
 
     # No cache or expired -> run synchronously
     try:
-        result = await asyncio.to_thread(_run_scan_sync, kite)
-        _inst_cache = result
-        _inst_cache_ts = time.time()
-        return {**result, "cached": False, "scanning": False}
+        result = await asyncio.to_thread(_run_scan_sync, kite, u)
+        _inst_cache[u] = result
+        _inst_cache_ts[u] = time.time()
+        return {**result, "universe": u, "cached": False, "scanning": False}
     except Exception as exc:
         logger.exception("Institutional scan failed")
         raise HTTPException(status_code=500, detail=str(exc))
