@@ -1,9 +1,11 @@
 """
 Admin route for the signal validation tracker.
 
-GET /api/admin/signal-stats?days=15 — per-signal-type win/loss aggregation
-GET /api/admin/signal-fires?limit=100 — recent raw fires
-GET /api/admin/run-outcome-check?horizon=15m — manual trigger (debug)
+GET  /api/admin/signal-stats?days=15  — per-signal-type win/loss aggregation
+GET  /api/admin/signal-fires?limit=100 — recent raw fires
+POST /api/admin/run-outcome-check?horizon=15m — manual trigger (debug)
+POST /api/admin/run-daily-digest      — manual trigger for the Telegram digest
+GET  /api/admin/preview-daily-digest  — preview the digest text without sending
 
 All routes require premium (which has admin bypass via X-Admin-Secret or
 localhost dev user).
@@ -22,8 +24,10 @@ from app.config import settings
 from app.dependencies import get_kite, get_supabase, require_premium
 from app.services.signal_validator import (
     HORIZONS,
+    build_daily_digest_text,
     check_outcomes_for_horizon,
     get_signal_stats,
+    send_daily_digest,
 )
 
 logger = logging.getLogger("alpha_radar.routes.signal_stats")
@@ -96,3 +100,20 @@ async def run_outcome_check(
         )
     summary = check_outcomes_for_horizon(horizon, kite)
     return {"success": True, "horizon": horizon, **summary}
+
+
+@router.get("/preview-daily-digest")
+async def preview_daily_digest(
+    user: dict = Depends(require_premium),
+) -> dict:
+    """Return the digest text without sending — useful for previewing format."""
+    text = build_daily_digest_text()
+    return {"success": True, "html": text, "chars": len(text)}
+
+
+@router.post("/run-daily-digest")
+async def run_daily_digest(
+    user: dict = Depends(require_premium),
+) -> dict:
+    """Manually trigger the daily Telegram digest (test the bot)."""
+    return {"success": True, **(await send_daily_digest())}

@@ -116,6 +116,22 @@ def _register_signal_validator_jobs() -> None:
             replace_existing=True,
         )
 
+        # Daily Telegram digest — 16:00 IST weekdays, after EOD validations finish
+        from app.services.signal_validator import send_daily_digest
+
+        async def _run_daily_digest() -> None:
+            try:
+                await send_daily_digest()
+            except Exception:
+                logger.exception("Daily digest failed")
+
+        sched.add_job(
+            _run_daily_digest,
+            trigger=CronTrigger(hour=16, minute=0, day_of_week="mon-fri", timezone=IST),
+            id="signal_daily_digest", name="Daily signal validator digest (Telegram)",
+            replace_existing=True,
+        )
+
         start_scheduler()
         logger.info("Signal validator scheduler started with %d jobs",
                     len(sched.get_jobs()))

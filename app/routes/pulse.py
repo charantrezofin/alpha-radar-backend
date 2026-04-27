@@ -177,6 +177,43 @@ async def market_pulse(
                 "pdl": stats["pdl"] if stats else 0,
             })
 
+            # Validation tracker — fire on PDH breakout or PDL breakdown only
+            # (the dedupe inside log_signal_fire handles repeat firing)
+            try:
+                from app.services.signal_validator import log_signal_fire, compute_market_context
+                if pdh_breakout and signal == "BULL":
+                    log_signal_fire(
+                        symbol=sym, signal_type="PULSE_BULL",
+                        trigger_price=ltp, strength=round(signal_pct, 2),
+                        direction="BULLISH",
+                        confidence="STRONG" if signal_pct > 3 else "MODERATE",
+                        category="stock",
+                        metadata={
+                            "change_pct": round(change_pct, 2),
+                            "vol_ratio": round(vol_ratio, 2),
+                            "r_factor": round(r_factor, 2),
+                            "pdh": stats["pdh"] if stats else 0,
+                        },
+                        context=compute_market_context(),
+                    )
+                elif pdl_breakdown and signal == "BEAR":
+                    log_signal_fire(
+                        symbol=sym, signal_type="PULSE_BEAR",
+                        trigger_price=ltp, strength=round(signal_pct, 2),
+                        direction="BEARISH",
+                        confidence="STRONG" if signal_pct > 3 else "MODERATE",
+                        category="stock",
+                        metadata={
+                            "change_pct": round(change_pct, 2),
+                            "vol_ratio": round(vol_ratio, 2),
+                            "r_factor": round(r_factor, 2),
+                            "pdl": stats["pdl"] if stats else 0,
+                        },
+                        context=compute_market_context(),
+                    )
+            except Exception:
+                logger.debug("[pulse] signal_validator log failed for %s", sym, exc_info=True)
+
         beacon_list = sorted(
             [r for r in results if r["signal"] != "NEUTRAL"],
             key=lambda r: r["signalPct"],
