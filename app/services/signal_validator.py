@@ -458,3 +458,115 @@ def get_signal_stats(days: int = 15) -> dict:
         summary["by_signal_type"][st] = out_h
 
     return summary
+
+
+# ── Daily digest (sent via Telegram) ────────────────────────────────────────
+
+def _format_pct(v: Optional[float], with_sign: bool = False) -> str:
+    if v is None:
+        return "—"
+    sign = "+" if (with_sign and v >= 0) else ""
+    return f"{sign}{v:.1f}%"
+
+
+def _signal_distinct_fires(stats: dict) -> int:
+    """Count distinct fires (each fire shows up under all 4 horizons in stats)."""
+    total = 0
+    for horizons in stats.get("by_signal_type", {}).values():
+        if "15m" in horizons:
+            total += horizons["15m"]["total"]
+    return total
+
+
+def build_daily_digest_text() -> str:
+    """
+    Compose the HTML body for the daily Telegram digest.
+    Compares yesterday (1d) vs the trailing week (7d) at the 1h horizon.
+    """
+    today = datetime.now(settings.TIMEZONE).strftime("%d %b %Y")
+    day_stats = get_signal_stats(days=1)
+    week_stats = get_signal_stats(days=7)
+
+    day_fires = _signal_distinct_fires(day_stats)
+    week_fires = _signal_distinct_fires(week_stats)
+
+    lines: list[str] = []
+    lines.append("<b>Signal Validator — Daily Digest</b>")
+    lines.append(f"<i>{today}</i>")
+    lines.append("")
+
+    if day_fires == 0:
+        lines.append("<b>No signals fired in the last 24h.</b>")
+        lines.append(
+            "Either market was closed, validator hadn't been deployed, "
+            "or no engine produced a STRONG/MODERATE setup."
+        )
+        lines.append(f"\n7-day total: <b>{week_fires}</b> fires")
+        lines.append("\n#AlphaRadar #SignalValidator")
+        return "\n".join(lines)
+
+    lines.append(f"<b>Yesterday's activity:</b> {day_fires} distinct fires")
+    lines.append("")
+
+    # Per-engine performance at 1h horizon
+    rows: list[tuple[str, Optional[float], Optional[float], int, int]] = []
+    for st, horizons in day_stats.get("by_signal_type", {}).items():
+        h1 = horizons.get("1h")
+        if not h1:
+            continue
+        rows.append((
+            st,
+            h1.get("win_rate"),
+            h1.get("avg_return_pct"),
+            h1.get("resolved", 0),
+            h1.get("total", 0),
+        ))
+
+    # Sort by win rate desc, with None last
+    rows.sort(key=lambda r: (r[1] is None, -(r[1] or 0)))
+
+    if rows:
+        lines.append("<b>1-hour horizon, by signal type:</b>")
+        for st, wr, ret, resolved, total in rows:
+            wr_s = _format_pct(wr)
+            ret_s = _format_pct(ret, with_sign=True)
+            sample = f"{resolved}/{total}" if resolved < total else f"{total}"
+            lines.append(f"  {st}: <b>{wr_s}</b> win, {ret_s} avg ({sample})")
+        lines.append("")
+
+    # 7-day rollup at 1h
+    week_resolved = 0
+    week_wins = 0
+    for horizons in week_stats.get("by_signal_type", {}).values():
+        h1 = horizons.get("1h")
+        if h1:
+            week_resolved += h1.get("resolved", 0)
+            week_wins += h1.get("wins", 0)
+    week_winrate = (week_wins / week_resolved * 100) if week_resolved > 0 else 0
+    lines.append(
+        f"<b>7-day rollup (1h):</b> {week_fires} fires, "
+        f"{week_resolved} resolved, "
+        f"<b>{week_winrate:.1f}%</b> win rate"
+    )
+
+    lines.append("")
+    lines.append("Full dashboard: /admin/signals")
+    lines.append("")
+    lines.append("#AlphaRadar #SignalValidator")
+    return "\n".join(lines)
+
+
+async def send_daily_digest() -> dict:
+    """
+    Build and send the daily Telegram digest.
+    Returns a status dict {sent, message_chars, telegram_ok}.
+    """
+    from app.core.telegram import send_message  # local import — avoids circular
+
+    text = build_daily_digest_text()
+    result = await send_message(text)
+    return {
+        "sent": bool(result and result.get("ok")),
+        "message_chars": len(text),
+        "telegram_ok": bool(result and result.get("ok")),
+    }
