@@ -65,6 +65,64 @@ def _save_kite_token() -> None:
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+def _register_signal_validator_jobs() -> None:
+    """Register outcome-check cron jobs for the signal validation tracker."""
+    try:
+        import asyncio
+        from apscheduler.triggers.cron import CronTrigger
+        from app.core.scheduler import get_scheduler, start_scheduler
+
+        from app.services.signal_validator import check_outcomes_for_horizon
+
+        IST = str(settings.TIMEZONE)
+
+        async def _run_check(horizon: str) -> None:
+            from app.core.kite_client import kite_state  # noqa: WPS433
+            if not kite_state.is_connected:
+                return
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, check_outcomes_for_horizon, horizon, kite_state.kite
+            )
+
+        sched = get_scheduler()
+
+        # 15m outcomes — every 5 min during 09:30–16:00 IST
+        sched.add_job(
+            _run_check, args=["15m"],
+            trigger=CronTrigger(minute="*/5", hour="9-16", timezone=IST),
+            id="validate_15m", name="Validate 15m outcomes",
+            replace_existing=True,
+        )
+        # 1h outcomes — every 15 min during 10:00–17:00 IST
+        sched.add_job(
+            _run_check, args=["1h"],
+            trigger=CronTrigger(minute="0,15,30,45", hour="10-17", timezone=IST),
+            id="validate_1h", name="Validate 1h outcomes",
+            replace_existing=True,
+        )
+        # EOD outcomes — daily at 15:35 IST
+        sched.add_job(
+            _run_check, args=["eod"],
+            trigger=CronTrigger(hour=15, minute=35, timezone=IST),
+            id="validate_eod", name="Validate EOD outcomes",
+            replace_existing=True,
+        )
+        # Next-day-EOD outcomes — daily at 15:40 IST (yesterday's fires)
+        sched.add_job(
+            _run_check, args=["next_day_eod"],
+            trigger=CronTrigger(hour=15, minute=40, timezone=IST),
+            id="validate_next_day_eod", name="Validate next-day-EOD outcomes",
+            replace_existing=True,
+        )
+
+        start_scheduler()
+        logger.info("Signal validator scheduler started with %d jobs",
+                    len(sched.get_jobs()))
+    except Exception:
+        logger.exception("Failed to register signal validator jobs")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup / shutdown lifecycle."""
@@ -72,10 +130,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("Data directory ensured at %s", settings.DATA_DIR.resolve())
     _load_saved_kite_token()
+    _register_signal_validator_jobs()
     logger.info("Alpha Radar backend started")
     yield
     # -- shutdown --
     _save_kite_token()
+    try:
+        from app.core.scheduler import stop_scheduler  # noqa: WPS433
+        stop_scheduler()
+    except Exception:
+        pass
     logger.info("Alpha Radar backend stopped")
 
 
@@ -142,6 +206,7 @@ def _mount_routers() -> None:
         "app.routes.quotes",
         "app.routes.options",
         "app.routes.signals",
+        "app.routes.signal_stats",
         "app.routes.scanner",
         "app.routes.pulse",
         "app.routes.squeeze",
