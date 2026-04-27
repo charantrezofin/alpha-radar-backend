@@ -220,6 +220,11 @@ async def fno_futures(kite: KiteConnect = Depends(get_kite)) -> dict:
             close = q.get("ohlc", {}).get("close", ltp) or ltp
             change_pct = round(((ltp - close) / close * 100), 2) if close > 0 else 0
 
+            oi = q.get("oi", 0) or 0
+            oi_day_low = q.get("oi_day_low", 0) or 0
+            oi_change = oi - oi_day_low if oi_day_low > 0 else 0
+            oi_change_pct = round((oi_change / oi_day_low) * 100, 2) if oi_day_low > 0 else 0
+
             result.append({
                 "name": name,
                 "tradingsymbol": inst["tradingsymbol"],
@@ -227,7 +232,10 @@ async def fno_futures(kite: KiteConnect = Depends(get_kite)) -> dict:
                 "lotSize": inst.get("lot_size", 0),
                 "last": ltp,
                 "volume": q.get("volume", 0) or 0,
-                "oi": q.get("oi", 0) or 0,
+                "oi": oi,
+                "oiDayLow": oi_day_low,
+                "oiChange": oi_change,
+                "oiChangePercent": oi_change_pct,
                 "change": q.get("net_change", 0) or 0,
                 "changePercent": change_pct,
             })
