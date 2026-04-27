@@ -24,6 +24,10 @@ from kiteconnect import KiteConnect
 
 from app.dependencies import get_kite
 from app.engines.institutional_buying import score_stock, build_sector_clusters
+from app.engines.accumulation import (
+    score_stock_accumulation,
+    build_accumulation_clusters,
+)
 
 logger = logging.getLogger("alpha_radar.routes.institutional")
 
@@ -135,6 +139,7 @@ def _run_scan_sync(kite: KiteConnect, universe: str = "nifty500") -> Dict[str, A
         logger.exception("Failed preloading NSE instruments")
 
     qualifying: List[Dict[str, Any]] = []
+    accumulating: List[Dict[str, Any]] = []
     filtered_count = 0
     error_count = 0
 
@@ -147,29 +152,79 @@ def _run_scan_sync(kite: KiteConnect, universe: str = "nifty500") -> Dict[str, A
             continue
         try:
             candles = _fetch_candles(kite, tok, days=180)
+
+            # Post-move scoring (Strong Movers — existing engine)
             res = score_stock(sym, candles)
-            if res is None:
-                continue
-            if res.get("filtered"):
+            if res is not None and not res.get("filtered"):
+                qualifying.append(res)
+            elif res is not None and res.get("filtered"):
                 filtered_count += 1
+                # Don't bother running accumulation on filtered stocks either
+                time.sleep(0.08)
                 continue
-            qualifying.append(res)
+
+            # Pre-move scoring (Accumulation — new engine, same candles)
+            accum = score_stock_accumulation(sym, candles)
+            if accum is not None and not accum.get("filtered"):
+                accumulating.append(accum)
         except Exception as exc:  # per-symbol error; keep going
             error_count += 1
             logger.debug("Scan error on %s: %s", sym, exc)
         # light rate-limit courtesy
         time.sleep(0.08)
 
+    # Strong-movers clusters + flag pass
     clusters = build_sector_clusters(qualifying)
     cluster_sectors = {c["sector"] for c in clusters}
     for r in qualifying:
         if r["sector"] in cluster_sectors and "SECTOR_CLUSTER" not in r["alert_flags"]:
             r["alert_flags"].append("SECTOR_CLUSTER")
-
     qualifying.sort(key=lambda r: r["score"], reverse=True)
+
+    # Accumulation clusters + flag pass
+    accum_clusters = build_accumulation_clusters(accumulating)
+    accum_cluster_sectors = {c["sector"] for c in accum_clusters}
+    for r in accumulating:
+        if r["sector"] in accum_cluster_sectors and "SECTOR_CLUSTER" not in r["alert_flags"]:
+            r["alert_flags"].append("SECTOR_CLUSTER")
+    accumulating.sort(key=lambda r: r["score"], reverse=True)
+
+    # Log STRONG accumulation fires to the signal validator
+    # (4-star+ only — keeps the validator focused on high-conviction setups)
+    try:
+        from app.services.signal_validator import (
+            log_signal_fire,
+            compute_market_context,
+        )
+        for r in accumulating:
+            if r.get("score", 0) >= 65:
+                try:
+                    log_signal_fire(
+                        symbol=r["symbol"],
+                        signal_type="ACCUM_BULLISH",
+                        trigger_price=r["current_price"],
+                        strength=r["score"],
+                        direction="BULLISH",
+                        confidence="STRONG" if r["stars"] == 5 else "MODERATE",
+                        category="stock",
+                        metadata={
+                            "stars": r["stars"],
+                            "pillar_scores": r["pillar_scores"],
+                            "details": r["details"],
+                            "alert_flags": r["alert_flags"],
+                            "engine": "accumulation",
+                        },
+                        context=compute_market_context(),
+                    )
+                except Exception:
+                    logger.exception("[institutional] accum fire log failed for %s", r["symbol"])
+    except Exception:
+        # Validator not deployed / Supabase not configured -- silently skip
+        logger.debug("[institutional] signal_validator unavailable; skipping fire log")
 
     elapsed = round(time.time() - started, 1)
     return {
+        # Strong Movers (post-move) -- existing keys, unchanged for FE compat
         "stocks": qualifying,
         "clusters": clusters,
         "stats": {
@@ -181,6 +236,15 @@ def _run_scan_sync(kite: KiteConnect, universe: str = "nifty500") -> Dict[str, A
             "four_star": sum(1 for s in qualifying if s["stars"] == 4),
             "three_star": sum(1 for s in qualifying if s["stars"] == 3),
             "elapsed_sec": elapsed,
+        },
+        # Accumulation (pre-move) -- NEW, additive
+        "accumulation_stocks": accumulating,
+        "accumulation_clusters": accum_clusters,
+        "accumulation_stats": {
+            "qualifying": len(accumulating),
+            "five_star": sum(1 for s in accumulating if s["stars"] == 5),
+            "four_star": sum(1 for s in accumulating if s["stars"] == 4),
+            "three_star": sum(1 for s in accumulating if s["stars"] == 3),
         },
         "timestamp": int(time.time() * 1000),
     }
@@ -227,6 +291,9 @@ async def institutional_buying(
         "stats": {"scanned": 0, "filtered_liquidity": 0, "qualifying": 0,
                   "errors": 0, "five_star": 0, "four_star": 0, "three_star": 0,
                   "elapsed_sec": 0},
+        "accumulation_stocks": [], "accumulation_clusters": [],
+        "accumulation_stats": {"qualifying": 0, "five_star": 0, "four_star": 0,
+                               "three_star": 0},
         "timestamp": int(time.time() * 1000),
     }
 
