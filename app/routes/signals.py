@@ -360,6 +360,32 @@ def _get_stock_signals(kite: KiteConnect, deep_limit: int = 20) -> dict:
             sig_dict["confidence"] = "STRONG" if abs(sig_dict["score"]) > 50 else ("MODERATE" if abs(sig_dict["score"]) > 25 else "WEAK")
             deep_signals.append(sig_dict)
 
+            # Validation tracker — log STRONG/MODERATE fires (skip WEAK and NEUTRAL)
+            if abs(sig_dict["score"]) >= 25 and sig_dict["direction"] != "NEUTRAL":
+                try:
+                    from app.services.signal_validator import log_signal_fire, compute_market_context
+                    sig_type = "OI_BULLISH" if sig_dict["direction"] == "BULLISH" else "OI_BEARISH"
+                    log_signal_fire(
+                        symbol=stock_name,
+                        signal_type=sig_type,
+                        trigger_price=stock_spot,
+                        strength=sig_dict["score"],
+                        direction=sig_dict["direction"],
+                        confidence=sig_dict["confidence"],
+                        category="stock",
+                        metadata={
+                            "pcr": pcr,
+                            "max_pain_strike": max_pain_strike,
+                            "max_pain_distance_pct": round(mp_dist, 2),
+                            "atm_iv": round(atm_iv, 1),
+                            "pre_score": pre_score,
+                            "reasons": sig_dict.get("reasons", []),
+                        },
+                        context=compute_market_context(),
+                    )
+                except Exception:
+                    logger.exception("[signals] signal_validator log failed for %s", stock_name)
+
         except Exception as exc:
             logger.error("[signals] Deep analysis failed for %s: %s", stock.get("name"), exc)
 
