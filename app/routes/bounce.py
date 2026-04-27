@@ -144,6 +144,26 @@ async def bounce_52w(
                 "signalType": "52W_BOUNCE",
             })
 
+            # Validation tracker
+            try:
+                from app.services.signal_validator import log_signal_fire, compute_market_context
+                log_signal_fire(
+                    symbol=symbol, signal_type="52W_BOUNCE",
+                    trigger_price=ltp, strength=float(scored.buying_score),
+                    direction="BULLISH",
+                    confidence="STRONG" if scored.buying_score >= 60 else "MODERATE",
+                    category="stock",
+                    metadata={
+                        "buying_score": scored.buying_score,
+                        "vol_ratio": round(vol_ratio, 2),
+                        "change_pct": round(change_pct, 2),
+                        "is_breakout": scored.is_breakout,
+                    },
+                    context=compute_market_context(),
+                )
+            except Exception:
+                logger.debug("[bounce] signal_validator log failed for %s", symbol, exc_info=True)
+
         bounce_stocks.sort(key=lambda s: s["volRatio"], reverse=True)
 
         result = {"stocks": bounce_stocks, "count": len(bounce_stocks), "timestamp": int(time.time() * 1000)}

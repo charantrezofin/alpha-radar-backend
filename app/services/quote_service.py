@@ -234,8 +234,128 @@ async def fetch_enriched_quotes(
                 pdl=pdl,
             )
 
-            # ORB tracking
+            # ORB tracking — snapshot latched state to detect first-fires
+            orb_break15_before = symbol in _orb_detector._orb_break_15
+            orb_break30_before = symbol in _orb_detector._orb_break_30
+            orb_breakdown15_before = symbol in _orb_detector._orb_break_down_15
+            orb_breakdown30_before = symbol in _orb_detector._orb_break_down_30
             orb_status = _orb_detector.check_orb_status(symbol, ltp)
+
+            # Validation tracker — log first-time fires for each signal type
+            try:
+                from app.services.signal_validator import log_signal_fire, compute_market_context
+                ctx = compute_market_context()
+
+                if tick_signal.pdh_first_cross:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="PDH_CROSS",
+                        trigger_price=ltp, strength=50.0,
+                        direction="BULLISH", confidence="MODERATE",
+                        category="stock",
+                        metadata={"pdh": pdh, "vol_ratio": buy_result.vol_ratio},
+                        context=ctx,
+                    )
+                if tick_signal.combo_surge_first:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="COMBO_SURGE",
+                        trigger_price=ltp, strength=70.0,
+                        direction="BULLISH", confidence="STRONG",
+                        category="stock",
+                        metadata={"pdh": pdh, "vol_ratio": buy_result.vol_ratio},
+                        context=ctx,
+                    )
+                if tick_signal.pdl_first_cross:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="PDL_CROSS",
+                        trigger_price=ltp, strength=50.0,
+                        direction="BEARISH", confidence="MODERATE",
+                        category="stock",
+                        metadata={"pdl": pdl, "vol_ratio": bear_result.vol_ratio_bear},
+                        context=ctx,
+                    )
+                if tick_signal.combo_sell_first:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="COMBO_SELL",
+                        trigger_price=ltp, strength=70.0,
+                        direction="BEARISH", confidence="STRONG",
+                        category="stock",
+                        metadata={"pdl": pdl, "vol_ratio": bear_result.vol_ratio_bear},
+                        context=ctx,
+                    )
+                if not orb_break15_before and orb_status.orb_break15:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="ORB_BREAK_15",
+                        trigger_price=ltp, strength=60.0,
+                        direction="BULLISH", confidence="MODERATE",
+                        category="stock",
+                        metadata={"orb_high_15": orb_status.orb_high_15},
+                        context=ctx,
+                    )
+                if not orb_break30_before and orb_status.orb_break30:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="ORB_BREAK_30",
+                        trigger_price=ltp, strength=70.0,
+                        direction="BULLISH", confidence="STRONG",
+                        category="stock",
+                        metadata={"orb_high_30": orb_status.orb_high_30},
+                        context=ctx,
+                    )
+                if not orb_breakdown15_before and orb_status.orb_break_down15:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="ORB_BREAKDOWN_15",
+                        trigger_price=ltp, strength=60.0,
+                        direction="BEARISH", confidence="MODERATE",
+                        category="stock",
+                        metadata={"orb_low_15": orb_status.orb_low_15},
+                        context=ctx,
+                    )
+                if not orb_breakdown30_before and orb_status.orb_break_down30:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="ORB_BREAKDOWN_30",
+                        trigger_price=ltp, strength=70.0,
+                        direction="BEARISH", confidence="STRONG",
+                        category="stock",
+                        metadata={"orb_low_30": orb_status.orb_low_30},
+                        context=ctx,
+                    )
+                # Score-based signals — fire on STRONG threshold (60+)
+                if buy_result.buying_score >= 60:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="BUYING_SCORE_HIGH",
+                        trigger_price=ltp, strength=float(buy_result.buying_score),
+                        direction="BULLISH",
+                        confidence="STRONG" if buy_result.buying_score >= 80 else "MODERATE",
+                        category="stock",
+                        metadata={
+                            "buying_score": buy_result.buying_score,
+                            "vol_ratio": buy_result.vol_ratio,
+                            "is_breakout": buy_result.is_breakout,
+                            "breakdown": {
+                                "vol": buy_result.vol_score,
+                                "pdh": buy_result.pdh_score,
+                                "momentum": buy_result.momentum_score,
+                                "range": buy_result.range_pos_score,
+                                "delivery": buy_result.delivery_score,
+                            },
+                        },
+                        context=ctx,
+                    )
+                if bear_result.bear_score >= 60:
+                    log_signal_fire(
+                        symbol=symbol, signal_type="BEAR_SCORE_HIGH",
+                        trigger_price=ltp, strength=float(bear_result.bear_score),
+                        direction="BEARISH",
+                        confidence="STRONG" if bear_result.bear_score >= 80 else "MODERATE",
+                        category="stock",
+                        metadata={
+                            "bear_score": bear_result.bear_score,
+                            "vol_ratio": bear_result.vol_ratio_bear,
+                            "is_pdl_break": bear_result.is_pdl_break,
+                        },
+                        context=ctx,
+                    )
+            except Exception:
+                logger.debug("[quote_service] signal_validator log failed for %s", symbol, exc_info=True)
 
             # Update quote cache
             quote_cache.set_quotes({symbol: q})
